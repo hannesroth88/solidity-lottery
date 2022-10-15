@@ -14,16 +14,18 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
     /* STATE VARIABLES */
     // Lottery
     address payable[] private s_players;
-    address public immutable owner;
-    uint256 public immutable i_entranceFee;
-    address public s_recentWinner;
-    RaffleState public s_raffleState;
+    address private immutable owner;
+    uint256 private immutable i_entranceFee;
+    address private s_recentWinner;
+    RaffleState private s_raffleState;
+    uint256 private immutable i_interval;
+    uint256 private s_timeStampLastRaffle;
 
     // Chainlink VRF Variables
     VRFCoordinatorV2Interface private immutable i_vrfCoordinatorInterface;
     bytes32 private immutable i_gasLane;
     uint64 private immutable i_subscriptionId;
-    uint16 private constant REQUESTCONFIRMATION = 3;
+    uint16 private constant REQUEST_CONFIRMATION = 3;
     uint32 private immutable i_callbackGasLimit;
     uint16 private constant NUMWORDS = 1;
     // Chainlink Automation Variables
@@ -32,6 +34,7 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
     error ExceptionNotEnoughEth();
     error ExceptionTransferFailed();
     error ExceptionRaffleNotOpen();
+    error ExceptionRaffleNotReady(uint256 currentBalance, uint256 numPlayers, uint256 raffleState);
 
     /* EVENTS */
     event RaffleEntered(address indexed player);
@@ -43,7 +46,8 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
         address vRFCoordinator,
         bytes32 gasLane,
         uint64 subscriptionId,
-        uint32 callbackGasLimit
+        uint32 callbackGasLimit,
+        uint256 interval
     ) VRFConsumerBaseV2(vRFCoordinator) {
         owner = msg.sender;
         i_entranceFee = entranceFee;
@@ -52,6 +56,8 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
         i_subscriptionId = subscriptionId;
         i_callbackGasLimit = callbackGasLimit;
         s_raffleState = RaffleState.OPEN;
+        i_interval = interval;
+        s_timeStampLastRaffle = block.timestamp;
     }
 
     // user can enter Raffle
@@ -69,14 +75,14 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
         emit RaffleEntered(msg.sender);
     }
 
-    function requestRandomWinner() external {
+    function requestRandomWinner() internal {
         // Set State to CALCULATING so no new Players can enter
         s_raffleState = RaffleState.CALCULATING;
         // request random numbers
         uint256 requestId = i_vrfCoordinatorInterface.requestRandomWords(
             i_gasLane,
             i_subscriptionId,
-            REQUESTCONFIRMATION,
+            REQUEST_CONFIRMATION,
             i_callbackGasLimit,
             NUMWORDS
         );
@@ -91,6 +97,7 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
         s_recentWinner = recentWinner;
         s_raffleState = RaffleState.OPEN;
         s_players = new address payable[](0);
+        s_timeStampLastRaffle = block.timestamp;
         // sent the whole balance to winner
         (bool success, ) = recentWinner.call{value: address(this).balance}("");
         if (!success) {
@@ -109,23 +116,76 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
      * 4. Implicity, your subscription is funded with LINK.
      */
     function checkUpkeep(
-        bytes calldata /* checkData */
+        bytes memory /* checkData */
     )
         public
-        view
         override
         returns (
             bool upkeepNeeded,
             bytes memory /* performData */
         )
-    {}
+    {
+        bool isOpen = (s_raffleState == RaffleState.OPEN);
+        bool enoughTimePassed = ((block.timestamp - s_timeStampLastRaffle) > i_interval);
+        bool hasPlayers = (s_players.length > 0);
+        bool hasBalance = (address(this).balance > 0);
+        upkeepNeeded = (isOpen && enoughTimePassed && hasPlayers && hasBalance);
+    }
 
     /**
      * @dev Once `checkUpkeep` is returning `true`, this function is called
      * and it kicks off a Chainlink VRF call to get a random winner.
      * Note: external because own contract should not call this
      */
-    function performUpkeep(bytes calldata performData) external override {}
+    function performUpkeep(
+        bytes calldata /* performData */
+    ) external override {
+        (bool upkeepNeeded, ) = checkUpkeep("");
+        if (upkeepNeeded) {
+            revert ExceptionRaffleNotReady(address(this).balance, s_players.length, uint256(s_raffleState));
+        }
+        requestRandomWinner();
+    }
+
+
+    /** Getter Functions */
+
+    function getRaffleState() public view returns (RaffleState) {
+        return s_raffleState;
+    }
+
+    function getNumWords() public pure returns (uint256) {
+        return NUMWORDS;
+    }
+
+    function getRequestConfirmations() public pure returns (uint256) {
+        return REQUEST_CONFIRMATION;
+    }
+
+    function getRecentWinner() public view returns (address) {
+        return s_recentWinner;
+    }
+
+    function getPlayer(uint256 index) public view returns (address) {
+        return s_players[index];
+    }
+
+    function getTimeStampLastRaffle( ) public view returns (uint256) {
+        return s_timeStampLastRaffle;
+    }
+
+    function getInterval() public view returns (uint256) {
+        return i_interval;
+    }
+
+    function getEntranceFee() public view returns (uint256) {
+        return i_entranceFee;
+    }
+
+    function getNumberOfPlayers() public view returns (uint256) {
+        return s_players.length;
+    }
+
 
     /*  removed because, public keyword is more gasefficient
     function getPayableAmount() public view returns(uint256) {
@@ -133,4 +193,5 @@ contract Lottery is VRFConsumerBaseV2, AutomationCompatibleInterface {
     } */
 
     // function drawRaffle(){}
+
 }
